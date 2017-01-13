@@ -73,6 +73,9 @@ EXPORT CLASS *init(CALLBACKS *fntable, MODULE *module, int argc, char *argv[])
 	(new evse_trip(module))->oclass;
 	NULL;
 
+	(new evse_event(module))->oclass;
+	NULL;
+
 	/* always return the first class registered */
 	return first;
 }

@@ -38,3 +38,5 @@ generators_generators_la_SOURCES += generators/evse_base.cpp
 generators_generators_la_SOURCES += generators/evse_base.h
 generators_generators_la_SOURCES += generators/evse_trip.cpp
 generators_generators_la_SOURCES += generators/evse_trip.h
+generators_generators_la_SOURCES += generators/evse_event.cpp
+generators_generators_la_SOURCES += generators/evse_event.h

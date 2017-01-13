@@ -64,6 +64,7 @@ void allocate_deltamode_arrays(void);				/* Overall function to allocate deltamo
 #include "central_dg_control.h"
 #include "evse_base.h"
 #include "evse_trip.h"
+#include "evse_event.h"
 
 #define UNKNOWN 0
 
