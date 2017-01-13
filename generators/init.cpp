@@ -67,7 +67,10 @@ EXPORT CLASS *init(CALLBACKS *fntable, MODULE *module, int argc, char *argv[])
 	(new central_dg_control(module))->oclass;
 	NULL;
 	
-	(new evcharger_multitrip(module))->oclass;
+	(new evse_base(module))->oclass;
+	NULL;
+
+	(new evse_trip(module))->oclass;
 	NULL;
 
 	/* always return the first class registered */

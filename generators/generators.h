@@ -62,7 +62,8 @@ void allocate_deltamode_arrays(void);				/* Overall function to allocate deltamo
 #include "rectifier.h"
 #include "solar.h"
 #include "central_dg_control.h"
-#include "evcharger_multitrip.h"
+#include "evse_base.h"
+#include "evse_trip.h"
 
 #define UNKNOWN 0
 
