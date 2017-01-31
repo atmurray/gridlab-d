@@ -15,7 +15,7 @@ struct ChargeEvent {
 	double		arrival_time;					///< Clock time arrive at home (HHMM)
 	double		arrival_soc;					///< Battery state of charge on arrival (percentage)
 	double		departure_time;					///< Clock time depart home (HHMM)
-	double		departure_soc;					///< Required state of charge on departure (percentage)
+	double		requested_soc;					///< Requested state of charge on departure (percentage)
 	double		battery_size;					///< Battery capacity (kW-h)
 	struct 		ChargeEvent *next;				///< Next trip in double linked list
 };

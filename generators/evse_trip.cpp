@@ -426,7 +426,7 @@ TIMESTAMP evse_trip::sync(TIMESTAMP t0, TIMESTAMP t1) {
 		
 		// Update the load power
 		gl_verbose("%s home_charge_energy is %f\n", obj->name, home_charge_energy);
-		update_load_power(t1 - t0, home_charge_energy);
+		update_load_power();
 
 		// Update the pointer
 		prev_time = t1;
@@ -963,7 +963,7 @@ struct VehicleTrip *evse_trip::get_next_vehicle_trip(TIMESTAMP t){
 				home_departure_time_d			= double_time_to_double_seconds(tmp_vehicle_trip->home_departure_time);
 				destination_arrival_time_d		= double_time_to_double_seconds(tmp_vehicle_trip->destination_arrival_time);
 				destination_departure_time_d	= double_time_to_double_seconds(tmp_vehicle_trip->destination_departure_time);
-				transition_offset_d				= 60.0*60.0*24.0; // default to twenty four hours
+				transition_offset_d				= 86400.0; // default to twenty four hours
 			
 				// Always has to be after the next_transition_start_d but also closer to the tmp_vehicle_trip_d time
 				if(home_arrival_time_d > tmp_vehicle_trip_d && (home_arrival_time_d - tmp_vehicle_trip_d) < transition_offset_d ) {
@@ -1030,7 +1030,7 @@ TIMESTAMP evse_trip::get_next_transition(TIMESTAMP t) {
 			home_departure_time_d			= double_time_to_double_seconds(trip->home_departure_time);
 			destination_arrival_time_d		= double_time_to_double_seconds(trip->destination_arrival_time);
 			destination_departure_time_d	= double_time_to_double_seconds(trip->destination_departure_time);
-			next_transition_offset_d		= 60.0*60.0*24.0; // default to twenty four hours
+			next_transition_offset_d		= 86400.0; // default to twenty four hours
 			
 			// Always has to be after the next_transition_start_d but also 
 			if(home_arrival_time_d > next_transition_start_d && (home_arrival_time_d - next_transition_start_d) < next_transition_offset_d ) {

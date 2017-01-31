@@ -118,8 +118,15 @@ int evse_event::init(OBJECT *parent)
 	charge_event_current = get_charge_event(init_time);
 	if(charge_event_current == NULL) {
 		event_id = 0;
+		charge_rate = 0;
+		vehicle_data.battery_size = 0.0;
+		vehicle_data.battery_soc = 0.0;
+		vehicle_data.battery_capacity = 0.0;
 	} else {
 		event_id = charge_event_current->event_id;
+		vehicle_data.battery_size = charge_event_current->battery_size;		
+		vehicle_data.battery_soc = charge_event_current->arrival_soc;
+		vehicle_data.battery_capacity = charge_event_current->battery_size * charge_event_current->arrival_soc;
 	}
 
 	// Set the starting location and next transition timestamp
@@ -136,85 +143,93 @@ int evse_event::init(OBJECT *parent)
 	return 1;
 }
 
-// @param	t0[TIMESTAMP]		Current timestamp
-// @param	t1[TIMESTAMP]		Previous timestamp
+// @param	t0[TIMESTAMP]		Previous timestamp
+// @param	t1[TIMESTAMP]		Current timestamp
 // @return	TIMESTAMP			
 TIMESTAMP evse_event::sync(TIMESTAMP t0, TIMESTAMP t1) {
 	OBJECT *obj = OBJECTHDR(this);
 	double charge_energy;
-	TIMESTAMP t2,tret, tdiff, time_to_next_state_change;
-	ChargeEvent	*tmp_charge_event;
+	TIMESTAMP t2, tdiff, tnext;
+	ChargeEvent	*next_charge_event;
 	
-	// Update the current vehicle
-	charge_event_current = get_charge_event(t1);
-	if(charge_event_current == NULL) {
-		event_id = 0;
-		vehicle_data.battery_size = 0.0;		
-		vehicle_data.battery_soc = 0.0;
-		vehicle_data.battery_capacity = 0.0;
-	} else {
-		if (event_id != 0) {
-			gl_warning("%s charge event %d interrupted charge event %d with SOC of %f with requested departure SOC of %f", obj->name, charge_event_current->event_id, event_id, vehicle_data.battery_soc, charge_event_current->departure_soc);		
+	// Time step currently in play
+	tdiff = t1 - t0;
+
+	gl_warning("%s t0: %d t1: %d ", obj->name, t0, t1);
+
+	// If we had an active charge event, charge the attached vehicle
+	if (event_id != 0) {
+		// charge the vehicle based on previous charge rate
+		charge_energy = charge_electric_vehicle(tdiff);
+		gl_warning("%s charge_energy is %f for tdiff %d", obj->name, charge_energy, tdiff);
+	}
+	
+	// Update the current connected vehicle
+	next_charge_event = get_charge_event(t1);
+		
+	if (next_charge_event == NULL) {
+		if ((charge_event_current != NULL) && (charge_rate != 0)) {
+			// This little hack ensures that it is possible to record the final charge state of a vehicle when it leaves
+			gl_warning("%s finished event %d with SOC of %f and charge_rate %f", obj->name, event_id, vehicle_data.battery_soc, charge_rate);
+			charge_event_current = NULL;
+			vehicle_data.next_state_change = t1 + 1;
+	
+			// Update the load power
+			update_load_power();
+
+			return vehicle_data.next_state_change;
+		} else {
+			// no active charge event
+			gl_warning("No charge event");
+			charge_event_current = NULL;			
+			event_id = 0;
+			charge_rate = 0;
+			vehicle_data.battery_size = 0.0;
+			vehicle_data.battery_soc = 0.0;
+			vehicle_data.battery_capacity = 0.0;
 		}
-		event_id = charge_event_current->event_id;
-		vehicle_data.battery_size = charge_event_current->battery_size;		
-		vehicle_data.battery_soc = charge_event_current->arrival_soc;
-		vehicle_data.battery_capacity = charge_event_current->battery_size * charge_event_current->arrival_soc;
+	} else {
+		// active charge event
+		if (charge_event_current == NULL) {
+			gl_warning("%s starting event %d with SOC of %f", obj->name, event_id, vehicle_data.battery_soc);
+			charge_event_current = next_charge_event;
+			event_id = charge_event_current->event_id;
+			vehicle_data.battery_size = charge_event_current->battery_size;		
+			vehicle_data.battery_soc = charge_event_current->arrival_soc;
+			vehicle_data.battery_capacity = charge_event_current->battery_size * charge_event_current->arrival_soc;
+		} else if (charge_event_current != next_charge_event) {
+			gl_warning("%s charge event %d interrupted charge event %d with SOC of %f with requested departure SOC of %f", obj->name, charge_event_current->event_id, event_id, vehicle_data.battery_soc, charge_event_current->requested_soc);		
+			charge_event_current = next_charge_event;
+			event_id = charge_event_current->event_id;
+			vehicle_data.battery_size = charge_event_current->battery_size;		
+			vehicle_data.battery_soc = charge_event_current->arrival_soc;
+			vehicle_data.battery_capacity = charge_event_current->battery_size * charge_event_current->arrival_soc;
+		} else {
+			gl_warning("%s continuing charge event %d", obj->name, charge_event_current->event_id);
+		}
 	}
 
-	gl_verbose("%s SYNC (%d): prev_time:%d | t1:%d | t0:%d",obj->name,event_id,prev_time,t1,t0);
+	// work out when the next transition is
+	vehicle_data.next_state_change = get_next_transition(t1);
+
+	gl_verbose("%s SYNC (%d): prev_time:%d | t1:%d | t0:%d | tnext: %d", obj->name, event_id, prev_time, t1, t0, vehicle_data.next_state_change);
 	
 	// Only perform an action if the time has changed and isn't first time
 	// This is due to the impact on the energy in the battery of the EV.
-	if ((prev_time != t1) && (t0 != 0)) {
-		
-		// Time step currently in play
-		tdiff = t1 - t0;
-		
-		// Intialise to zero
-		charge_energy = 0;
+	if ((prev_time != t1) && (t0 != 0)) {		
 
 		// Time step to the state change for the electric vehicle
-		time_to_next_state_change = vehicle_data.next_state_change - t0;
-		gl_verbose("Time to next SC: %d",time_to_next_state_change);
+		tnext = vehicle_data.next_state_change - t1;
+		gl_verbose("Time to next SC: %d", tnext);
 
-		// If we have an active charge event, charge the attached vehicle
+		// If we have an active charge event, charge the attached vehicle and update charge rate
 		if (event_id != 0) {
-			set_charge_rate(time_to_next_state_change);
-
-			// If the new timestamp is at or above the point of change to driving to the destination we need to finish the charge and move onto the driving discharge
-			if (t1 >= vehicle_data.next_state_change) {
-				
-				// Charge for remaining time before the next_state_change
-				tdiff = vehicle_data.next_state_change - t0;					
-				charge_energy = charge_electric_vehicle(tdiff);
-				
-				// New time diff
-				tdiff = t1 - vehicle_data.next_state_change;
-				
-				// TODO: warn if we didn't achieve the requested departure SOC
-				if (vehicle_data.battery_soc < charge_event_current->departure_soc) {
-					gl_warning("%s finished event %d with SOC of %f which is less than requested departure SOC of %f", obj->name, event_id, vehicle_data.battery_soc, charge_event_current->departure_soc);
-				}
-				
-				// Update the next transition
-				vehicle_data.next_state_change = get_next_transition(t1);
-
-				event_id = 0;
-				vehicle_data.battery_size = 0.0;		
-				vehicle_data.battery_soc = 0.0;
-				vehicle_data.battery_capacity = 0.0;
-			}
-			// Otherwise we are still charging the battery
-			else {
-				// Charge it
-				charge_energy = charge_electric_vehicle(tdiff);
-			}
+			// update the charge rate
+			vehicle_data.next_state_change = t1 + set_charge_rate(tnext);
 		}
 		
 		// Update the load power
-		gl_verbose("%s charge_energy is %f\n", obj->name, charge_energy);
-		update_load_power(t1 - t0, charge_energy);
+		update_load_power();
 
 		// Update the pointer
 		prev_time = t1;
@@ -231,20 +246,18 @@ TIMESTAMP evse_event::sync(TIMESTAMP t0, TIMESTAMP t1) {
 	// load.total = load.power;
 
 	// Pull the next state transition
-	tret = vehicle_data.next_state_change;
 
 	// Minimum timestep check
 	if (off_nominal_time == true)
 	{
 		// See where our next "expected" time is
 		t2 = t1 + glob_min_timestep;
-		if (tret < t2)	// tret is less than the next "expected" timestep
-			tret = t2;	// Unfortunately, GridLAB-D is "special" and doesn't know how to handle this with min timesteps.  We have to fix it.
+		if (vehicle_data.next_state_change < t2)	// tret is less than the next "expected" timestep
+			vehicle_data.next_state_change = t2;	// Unfortunately, GridLAB-D is "special" and doesn't know how to handle this with min timesteps.  We have to fix it.
 	}
+	gl_warning("%s charge event %d, next transition is %d", obj->name, event_id, vehicle_data.next_state_change);			
 
-	gl_verbose("%s finished event %d at %d with SOC of %f and returning %d", obj->name, event_id, location, vehicle_data.battery_soc,tret);
-	
-	return tret;
+	return vehicle_data.next_state_change;
 }
 
 // @return int				0 or 1 based on if the object is of type classname
@@ -314,7 +327,7 @@ int evse_event::init_charge_events() {
 		charge_event_end->arrival_time					= -1;
 		charge_event_end->arrival_soc					= -1;
 		charge_event_end->departure_time				= -1;
-		charge_event_end->departure_soc					= -1;
+		charge_event_end->requested_soc					= -1;
 		charge_event_end->battery_size					= -1;
 
 		token = strtok_s(NULL, delim, &next);
@@ -420,20 +433,20 @@ int evse_event::init_charge_events() {
 								temp_charge_event->days = (int)(atof(buffer2));
 							} else if(strcmp(column_current->name,"arrival_time") == 0) {
 								temp_charge_event->arrival_time = atof(buffer2);
-								// Deal with decimal based time of day (eg: Excel format)
-								if( 0 < temp_charge_event->arrival_time && temp_charge_event->arrival_time < 1 ) {
-									temp_charge_event->arrival_time = double_seconds_to_double_time( (temp_charge_event->arrival_time * 1440) * 60 );
+								// Deal with decimal based HHMM format
+								if(temp_charge_event->arrival_time >= 1 ) {
+									temp_charge_event->arrival_time = double_time_to_double_seconds(temp_charge_event->arrival_time) / 86400;
 								}
 							} else if(strcmp(column_current->name,"arrival_soc") == 0) {
 								temp_charge_event->arrival_soc = atof(buffer2);
 							} else if(strcmp(column_current->name,"departure_time") == 0) {
 								temp_charge_event->departure_time = atof(buffer2);
-								// Deal with decimal based time of day (eg: Excel format)
-								if( 0 < temp_charge_event->departure_time && temp_charge_event->departure_time < 1 ) {
-									temp_charge_event->departure_time = double_seconds_to_double_time( (temp_charge_event->departure_time * 1440) * 60 );
+								// Deal with decimal based HHMM format
+								if(temp_charge_event->departure_time >= 1 ) {
+									temp_charge_event->departure_time = double_time_to_double_seconds(temp_charge_event->departure_time) / 86400;
 								}
-							} else if(strcmp(column_current->name,"departure_soc") == 0) {
-								temp_charge_event->departure_soc = atof(buffer2);
+							} else if(strcmp(column_current->name,"requested_soc") == 0) {
+								temp_charge_event->requested_soc = atof(buffer2);
 							} else if(strcmp(column_current->name,"battery_size") == 0) {
 								temp_charge_event->battery_size = atof(buffer2);
 							}
@@ -481,7 +494,7 @@ int evse_event::charge_events_length() {
 	return i;
 }
 
-// Updates event details where they are blank (eg: no departure_soc)
+// Updates event details where they are blank (eg: no requested_soc)
 // @param	event[struct ChargeEvent*]		Pointer to a ChargeEvent
 // @return	int								0|1 depending upon success. Can then be used to validate
 int evse_event::complete_event_details(struct ChargeEvent *event) {
@@ -503,9 +516,9 @@ int evse_event::complete_event_details(struct ChargeEvent *event) {
 		gl_warning("Cannot determine the battery size");
 		return 0;
 	}
-	if(event->departure_soc == -1) {
+	if(event->requested_soc == -1) {
 		// default to fully charged
-		event->departure_soc = 100.0;
+		event->requested_soc = 100.0;
 	}
 	return 1;
 }
@@ -517,7 +530,7 @@ int evse_event::complete_event_details(struct ChargeEvent *event) {
 struct ChargeEvent *evse_event::get_charge_event(TIMESTAMP t){
 	ChargeEvent	*tmp_charge_event, *return_charge_event;
 	DATETIME	t_date;
-	double		t_seconds, t_seconds_comparison, arrival_time_seconds, departure_time_seconds;
+	double		t_seconds, t_seconds_comparison, departure_time_offset;
 	int 		overnight;
 
 	// in a DATETIME format for each of comparisons
@@ -538,17 +551,20 @@ struct ChargeEvent *evse_event::get_charge_event(TIMESTAMP t){
 			
 			// not between arrival_time and departure_time accounting for overnight stays
 			// Rotate times so that arrival_time is always at 0, thus we are then checking if t_seconds_comparison >= departure_time_seconds
-			arrival_time_seconds	= fmod(double_time_to_double_seconds(tmp_charge_event->arrival_time) + (86400.0-double_time_to_double_seconds(tmp_charge_event->arrival_time)),86400.0);
-			departure_time_seconds	= fmod(double_time_to_double_seconds(tmp_charge_event->departure_time) + (86400.0-double_time_to_double_seconds(tmp_charge_event->arrival_time)),86400.0);
-			t_seconds_comparison		= fmod(t_seconds + (86400.0-double_time_to_double_seconds(tmp_charge_event->arrival_time)),86400.0);
+			departure_time_offset	= 86400.0 * fmod(tmp_charge_event->departure_time - tmp_charge_event->arrival_time, 1.0);
+			t_seconds_comparison	= fmod(t_seconds - 86400.0 * tmp_charge_event->arrival_time, 86400.0);
 			
 			// Rotation based on making the arrival time 0 -> fmod(time + (86400.0-arrival_time_seconds),86400.0)
 			// Return if it's just arrived as it has priority
-			if( t_seconds_comparison == arrival_time_seconds ) {
+			if( t_seconds_comparison == 0 ) {
 				return tmp_charge_event;
 			}
 			// Otherwise if you're on the event that's awesome too, but we'll check the rest first.
-			else if( t_seconds_comparison >= departure_time_seconds ) {
+			else if (
+				( t_seconds_comparison > 0 ) &&
+				( t_seconds_comparison < departure_time_offset )
+				) {
+				gl_warning("now: %f dep: %f", t_seconds_comparison, departure_time_offset);	
 				return_charge_event = tmp_charge_event;
 			}
 		}
@@ -609,11 +625,11 @@ struct ChargeEvent *evse_event::get_next_charge_event(TIMESTAMP t){
 			if(charge_event_valid_day_of_week(t_tmp_charge_event_date.weekday,tmp_charge_event) && charge_event_valid_month_of_year(t_tmp_charge_event_date.month,tmp_charge_event)) {
 
 				// DateTime of the test time (t or midnight of a following day)
-				tmp_charge_event_d		 		= datetime_time_to_double_seconds(&t_tmp_charge_event_date); 
+				tmp_charge_event_d		 	= datetime_time_to_double_seconds(&t_tmp_charge_event_date); 
 				// Do the same for each of the times for a event. A valid event only occurs if the time tmp_charge_event_d is not at home
-				arrival_time_d				= double_time_to_double_seconds(tmp_charge_event->arrival_time);
-				departure_time_d			= double_time_to_double_seconds(tmp_charge_event->departure_time);
-				transition_offset_d				= 60.0*60.0*24.0; // default to twenty four hours
+				arrival_time_d				= 86400.0 * tmp_charge_event->arrival_time;
+				departure_time_d			= 86400.0 * tmp_charge_event->departure_time;
+				transition_offset_d			= 86400.0; // default to twenty four hours
 			
 				// Always has to be after the next_transition_start_d but also closer to the tmp_charge_event_d time
 				if(arrival_time_d > tmp_charge_event_d && (arrival_time_d - tmp_charge_event_d) < transition_offset_d ) {
@@ -649,7 +665,7 @@ TIMESTAMP evse_event::get_next_transition(TIMESTAMP t) {
 	TIMESTAMP	next_transition;
 	DATETIME	next_transition_date;
 	int			i;
-	double		next_transition_start_d, next_transition_offset_d, arrival_time_d, departure_time_d;
+	TIMESTAMP	next_transition_start_d, next_transition_offset_d, arrival_time_d, departure_time_d;
 	
 	// This is definitely the next one, so lets look for the best option.
 	event = get_next_charge_event(t);
@@ -670,9 +686,9 @@ TIMESTAMP evse_event::get_next_transition(TIMESTAMP t) {
 			gl_localtime(next_transition,&next_transition_date);
 
 			next_transition_start_d 		= datetime_time_to_double_seconds(&next_transition_date); // either 0 if not day of t, or the time of day if day of t. Thus transition is next_transition + ()
-			arrival_time_d					= double_time_to_double_seconds(event->arrival_time);
-			departure_time_d				= double_time_to_double_seconds(event->departure_time);
-			next_transition_offset_d		= 60.0*60.0*24.0; // default to twenty four hours
+			arrival_time_d					= 86400.0 * event->arrival_time;
+			departure_time_d				= 86400.0 * event->departure_time;
+			next_transition_offset_d		= 86400.0; // default to twenty four hours
 			
 			// Always has to be after the next_transition_start_d but also 
 			if(arrival_time_d > next_transition_start_d && (arrival_time_d - next_transition_start_d) < next_transition_offset_d ) {
@@ -689,6 +705,8 @@ TIMESTAMP evse_event::get_next_transition(TIMESTAMP t) {
 			}
 		}
 	}
+    gl_warning("now: %d nt: %d nto: %d", t, next_transition, next_transition_offset_d);
+	
 	return next_transition;
 }
 
@@ -731,7 +749,7 @@ void evse_event::gl_warning_charge_event(struct ChargeEvent *event) {
 		gl_warning("arrival_time: %f",event->arrival_time);
 		gl_warning("arrival_soc: %d",event->arrival_soc);		
 		gl_warning("departure_time: %f",event->departure_time);
-		gl_warning("departure_soc: %d",event->departure_soc);		
+		gl_warning("requested_soc: %d",event->requested_soc);		
 		gl_warning("battery_size: %d",event->battery_size);		
 		gl_warning("*next: %d",event->next);
 		gl_warning("self: %d",event);

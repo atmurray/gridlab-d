@@ -102,9 +102,9 @@ class evse_base : public power_electronics
 		complex				*get_complex(OBJECT *obj, char *name);				///< 
 
 		// Alter the electric vehicle's state of charge
-		int					set_charge_rate(TIMESTAMP t);						///< Sets the charge_rate based on the various types of 
+		TIMESTAMP			set_charge_rate(TIMESTAMP t);						///< Sets the charge_rate based on the various types of 
 		int					set_charger_load(double power);						///< Sets the charge_rate based on the various types of 
-		int					update_load_power(TIMESTAMP t, double energy);		///< Updates the load power based on the difference in energy before + after charge and the duration TIMESTAMP t
+		void				update_load_power();								///< Updates the load power based on the set charge_rate
 		double				charge_electric_vehicle(TIMESTAMP t);				///< Charge the electric vehicle for a duration of TIMESTAMP t
 		
 		// Time helpers

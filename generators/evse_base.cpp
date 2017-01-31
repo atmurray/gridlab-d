@@ -331,16 +331,6 @@ int evse_base::init(OBJECT *parent)
 	gl_localtime(init_time,&init_date);
 	// What about timezones
 
-	// Errors
-	// Battery size not set
-	if (vehicle_data.battery_size <= 0.0) {
-		GL_THROW("Battery size is not specified, nor are the mileage classification or efficiency!");
-		/*  TROUBLESHOOT
-		The battery size, mileage classification, and efficiency are all undefined.  At least two of these
-		need to be defined to properly initialize the object.
-		*/
-	}
-
 	// Determine state of charge - assume starts at 100% SOC at home initially, so adjust accordingly
 	if ((vehicle_data.battery_capacity < 0.0) && (vehicle_data.battery_soc >= 0.0)) {
 		// Populate current capacity based on SOC
@@ -459,8 +449,10 @@ TIMESTAMP evse_base::get_global_minimum_timestep() {
 
 // Sets the charge rate for this duration
 // @param t[TIMESTAMP]		The time duration until the next transition
-int evse_base::set_charge_rate(TIMESTAMP t) {
+// @return TIMESTAMP		The time duration until the next transition, battery fully charged or battery discharge
+TIMESTAMP evse_base::set_charge_rate(TIMESTAMP t) {
 	OBJECT *obj = OBJECTHDR(this);
+	TIMESTAMP tfull = t;
 
 	switch(vehicle_data.charge_regime) {
 		// Charge rate is set so that the battery is fully charged by timestamp t
@@ -487,8 +479,11 @@ int evse_base::set_charge_rate(TIMESTAMP t) {
 		// Charge rate is set to maximum charge rate - note: also default
 		case FULL_POWER:
 		default:
-			charge_rate = vehicle_data.max_charge_rate;
-			break;
+			if( vehicle_data.battery_soc < 100.0) {
+				charge_rate = vehicle_data.max_charge_rate;
+			} else {
+				charge_rate = 0.0;
+			}
 	}
 	
 	// If the meter is off, reset to zero irrespective
@@ -499,7 +494,21 @@ int evse_base::set_charge_rate(TIMESTAMP t) {
 	
 	gl_verbose("Time is: %d; ChargeCurrents Are: %f,%f,%f; Energy required is: %f",load_data.phaseA_I.Mag(),load_data.phaseB_I.Mag(),load_data.phaseC_I.Mag(),t,vehicle_data.battery_size - vehicle_data.battery_capacity);
 	
-	return 1;
+	if (charge_rate == 0) {
+		return t;
+	}
+	if (charge_rate < 0) {
+		// discharging		
+		if (vehicle_data.battery_capacity <= 0) return t;
+		tfull = vehicle_data.battery_capacity * 3600.0 / (-charge_rate * vehicle_data.charge_efficiency / 1000.0);	
+	} else {
+		// charging
+		if (vehicle_data.battery_capacity >= vehicle_data.battery_size) return t;
+		tfull = (vehicle_data.battery_size - vehicle_data.battery_capacity) * 3600.0 / (charge_rate * vehicle_data.charge_efficiency / 1000.0);	
+	}
+	if (tfull < 0) GL_THROW("tfull less than 0");
+	if (tfull < t) return tfull;
+	return t;
 }
 
 // Sets the charger's load based on the charge_rate
@@ -641,18 +650,20 @@ double evse_base::charge_electric_vehicle(TIMESTAMP t) {
 	double charge_energy = 0;
 	double prev_capacity = vehicle_data.battery_capacity;
 	
-		if (enabled) {
-			charge_energy = ((double)(t) / 3600.0) * (charge_rate / 1000.0) * vehicle_data.charge_efficiency;
-			
-			vehicle_data.battery_capacity += charge_energy;
-			
-			if (vehicle_data.battery_capacity < 0.0) {
-				vehicle_data.battery_capacity = 0.0;
-			}
-			else if (vehicle_data.battery_capacity > vehicle_data.battery_size)	{
-				vehicle_data.battery_capacity = vehicle_data.battery_size;
-			}
+	if (enabled) {
+		charge_energy = ((double)(t) / 3600.0) * (charge_rate * vehicle_data.charge_efficiency / 1000.0 );
+		
+		vehicle_data.battery_capacity += charge_energy;
+		
+		if (vehicle_data.battery_capacity < 0.0) {
+			gl_warning("Vehicle somehow over discharged, this shouldn't be possible");	
+			vehicle_data.battery_capacity = 0.0;
 		}
+		else if (vehicle_data.battery_capacity > vehicle_data.battery_size)	{
+			gl_warning("Vehicle somehow overcharged, this shouldn't be possible");
+			vehicle_data.battery_capacity = vehicle_data.battery_size;
+		}
+	}
 
 	// Update SOC
 	vehicle_data.battery_soc = vehicle_data.battery_capacity / vehicle_data.battery_size * 100.0;
@@ -664,32 +675,23 @@ double evse_base::charge_electric_vehicle(TIMESTAMP t) {
 // @param t[TIMESTAMP]		The timestamp of the next transition
 // @param energy[double]	The amount of energy in kWh provided to the charger over the time period
 // @return	int				0|1 based on success of update
-int evse_base::update_load_power(TIMESTAMP t, double energy) {
-	if((double)(t) > 0.0) {
-		// Power needs to ensure that it also takes into account the energy lost to the charger
-		energy = energy / vehicle_data.charge_efficiency;
-		double power = ( energy * ( 1000.0 ) ) / ( (double)(t) / ( 3600.0 ) );
-		
-		// First reset the charger load, given the energy actually used as the charge_rate as opposed to the 
-		set_charger_load(power);
-		// Add it to the parent power details
-		
-		// Americana Triplex-line
-		if ( (phases & 0x0010) == 0x0010 ) {
-			*pLine12 += load_data.phaseA_I;
-		}
-		// Otherwise, it's one of the others
-		else {
-			// gl_verbose("S.ULP.B:M.Currents: %f|%f,%f|%f,%f|%f",pLine_I[0].Re(),pLine_I[0].Im(),pLine_I[1].Re(),pLine_I[1].Im(),pLine_I[2].Re(),pLine_I[2].Im());
-			pLine_I[0] += load_data.phaseA_I;
-			pLine_I[1] += load_data.phaseB_I;
-			pLine_I[2] += load_data.phaseC_I;
-			// gl_verbose("S.ULP.A:M.Currents: %f|%f,%f|%f,%f|%f",pLine_I[0].Re(),pLine_I[0].Im(),pLine_I[1].Re(),pLine_I[1].Im(),pLine_I[2].Re(),pLine_I[2].Im());
-		}
-		
-		return 1;
+void evse_base::update_load_power() {
+	// First reset the charger load
+	set_charger_load(charge_rate);
+	// Add it to the parent power details
+	
+	// Americana Triplex-line
+	if ( (phases & 0x0010) == 0x0010 ) {
+		*pLine12 += load_data.phaseA_I;
 	}
-	return 0;
+	// Otherwise, it's one of the others
+	else {
+		// gl_verbose("S.ULP.B:M.Currents: %f|%f,%f|%f,%f|%f",pLine_I[0].Re(),pLine_I[0].Im(),pLine_I[1].Re(),pLine_I[1].Im(),pLine_I[2].Re(),pLine_I[2].Im());
+		pLine_I[0] += load_data.phaseA_I;
+		pLine_I[1] += load_data.phaseB_I;
+		pLine_I[2] += load_data.phaseC_I;
+		// gl_verbose("S.ULP.A:M.Currents: %f|%f,%f|%f,%f|%f",pLine_I[0].Re(),pLine_I[0].Im(),pLine_I[1].Re(),pLine_I[1].Im(),pLine_I[2].Re(),pLine_I[2].Im());
+	}
 }
 
 /* ------------------------------------------------------------------ 
